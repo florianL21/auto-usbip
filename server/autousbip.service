@@ -1,0 +1,10 @@
+[Unit]
+Description=Auto binds all USB ports automatically to USBIP
+After=multi-user.target
+
+[Service]
+Type=idle
+ExecStart=/home/autousbip.py > /home/autousbip.log 2>&1
+
+[Install]
+WantedBy=multi-user.target
