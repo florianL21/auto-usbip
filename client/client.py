@@ -9,9 +9,10 @@ import pystray
 from PIL import Image
 import threading
 from multiprocessing import Pipe
+import logging
+import sys
 
 PORT = 3240
-SERVERS = ["10.0.0.37"]
 USB_ID_REGEX = re.compile(r"^\s+([A-Za-z0-9.\-_]+)\:.*$")
 USB_PORT_REGEX = re.compile(
     r"^Port\s([A-Za-z0-9.\-_]+)\:\s+(.*)$\n\s+(.*)$", re.MULTILINE
@@ -36,7 +37,7 @@ def get_remote_usb_devices(ip: str):
     p = subprocess.run(["usbip", "list", "-p", "-r", ip], capture_output=True)
     usbids: list[str] = []
     if p.returncode != 0:
-        print(f"Error getting list of remote usb devices: {p.stderr.decode()}")
+        logger.error(f"Error getting list of remote usb devices: {p.stderr.decode()}")
         return usbids
     output = p.stdout.decode()
     for line in output.split("\n"):
@@ -54,17 +55,17 @@ class ImportedDevice:
 
     def detach(self):
         detach_device(str(self.port))
-        print(f"Detached device {self.desc}")
+        logger.info(f"Detached device {self.desc}")
 
     def __str__(self) -> str:
-        return f"Port {self.port}: {self.kind}\n{self.desc}"
+        return f"Port {self.port}: {self.kind} -> {self.desc}"
 
 
 def get_imported_devices():
     p = subprocess.run(["usbip", "port"], capture_output=True)
     ports: list[ImportedDevice] = []
     if p.returncode != 0:
-        print(f"Error getting list of attached ports: {p.stderr.decode()}")
+        logger.error(f"Error getting list of attached ports: {p.stderr.decode()}")
         return ports
     output = p.stdout.decode()
     matches = USB_PORT_REGEX.findall(output)
@@ -77,7 +78,7 @@ def get_imported_devices():
 def attach_device(server: str, usbid: str):
     result = subprocess.run(["usbip", "attach", "-r", server, "-b", usbid, "-t"])
     if result.returncode != 0:
-        print("Error attaching usb device")
+        logger.error("Error attaching usb device")
         return False
     return True
 
@@ -85,7 +86,7 @@ def attach_device(server: str, usbid: str):
 def detach_device(port: str):
     p = subprocess.run(["usbip", "detach", "-p", port], capture_output=True)
     if p.returncode != 0:
-        print(f"Error detaching usb device: {p.stderr.decode()}")
+        logger.error(f"Error detaching usb device: {p.stderr.decode()}")
         return False
     return True
 
@@ -96,17 +97,18 @@ def detach_all_ports():
 
 
 def main(
+    servers: list[str],
     kill_signal: PipeConnection,
     try_icon: pystray.Icon,
 ):
     os.environ["KEEPALIVE_TIMEOUT"] = str(PORT_KEEPALIVE_TIMEOUT)
     # detach all preexisting devices to start clean
-    print("cleaning up preexisting connections")
+    logger.info("cleaning up preexisting connections")
     detach_all_ports()
     try:
         while kill_signal.poll() == False:
             available_devices: list[tuple[str, str]] = []
-            for server_ip in SERVERS:
+            for server_ip in servers:
                 if ping_server(server_ip, PORT):
                     available_devices += [
                         (server_ip, id) for id in get_remote_usb_devices(server_ip)
@@ -128,12 +130,20 @@ def build_menu(
         kill_signal.send(True)
 
     for device in get_imported_devices():
-        yield pystray.MenuItem(str(device), action=lambda: None)
+        yield pystray.MenuItem(str(device), action=lambda: None, enabled=False)
     yield pystray.Menu.SEPARATOR
     yield pystray.MenuItem("Exit", action=stop)
 
 
 if __name__ == "__main__":
+    global logger
+    logging.basicConfig(level=logging.INFO)
+    logger = logging.getLogger("auto-usbip-client")
+    if len(sys.argv) <= 1:
+        logger.error(
+            "Please provide a list of server IP addresses as command line arguments"
+        )
+    servers = sys.argv[1:]
     logo = Path("systray-logo.png")
     image = Image.open(logo)
     attached_devices: list[str] = []
@@ -145,5 +155,5 @@ if __name__ == "__main__":
         title="Auto USB IP",
         menu=pystray.Menu(lambda: build_menu(tray_icon, kill_signal_tx)),
     )
-    threading.Thread(target=lambda: main(kill_signal_rx, tray_icon)).start()
+    threading.Thread(target=lambda: main(servers, kill_signal_rx, tray_icon)).start()
     tray_icon.run()
