@@ -14,7 +14,7 @@ import logging
 import sys
 from serial.tools import list_ports
 from serial.tools.list_ports_common import ListPortInfo
-from urllib3 import Retry
+from typing import TypeVar
 
 USB_ID_REGEX = re.compile(r"^\s+([A-Za-z0-9.\-_]+)\:.*$")
 
@@ -45,36 +45,61 @@ class ImportedDevice:
         self.kind = kind.strip()
         self.desc = desc.strip()
         self.speed: str | None = None
-        self.vid = None
-        self.pid = None
-        self.com_port = None
-        re_match = ImportedDevice.BRACKET_REGEX.match(self.kind)
-        if re_match:
-            self.speed = re_match.group(1)
         re_match = ImportedDevice.BRACKET_REGEX.match(self.desc)
-
         if re_match:
             vid_pid = re_match.group(1)
             vid, pid = vid_pid.split(":")
-            self.vid = int(vid, 16)
-            self.pid = int(pid, 16)
+            self._vid = int(vid, 16)
+            self._pid = int(pid, 16)
+        self._com_port = self.try_get_com_port(serial_connections)
+        re_match = ImportedDevice.BRACKET_REGEX.match(self.kind)
+        if re_match:
+            self.speed = re_match.group(1)
+
+    def try_get_com_port(self, serial_connections: list[ListPortInfo] | None = None):
+        if serial_connections is None:
+            serial_connections = list_ports.comports()
+        if self.has_vid_pid:
             potential_matches = [
                 conn.device
                 for conn in serial_connections
-                if conn.vid == self.vid and conn.pid == self.pid
+                if conn.vid == self._vid and conn.pid == self._pid
             ]
             if len(potential_matches) == 1:
-                self.com_port = potential_matches[0]
+                return potential_matches[0]
+        return None
+
+    @property
+    def com_port(self):
+        if self._com_port is None and self.has_vid_pid:
+            self._com_port = self.try_get_com_port()
+        return self._com_port
+
+    @property
+    def has_vid_pid(self):
+        return self._vid is not None and self._pid is not None
 
     def detach(self):
         detach_device(str(self.port))
         logger.info(f"Detached device {self.desc}")
 
     def __str__(self) -> str:
-        if self.vid is not None and self.pid is not None:
+        if self.com_port is not None:
             return f"[{self.com_port}] Port {self.port}: {self.speed} -> {self.desc}"
         else:
             return f"Port {self.port}: {self.kind} -> {self.desc}"
+
+    def connection(self) -> str:
+        if self.com_port is not None:
+            return self.com_port
+        else:
+            return f"Port {self.port}"
+
+    def __hash__(self) -> int:
+        if self.has_vid_pid:
+            return hash(f"{self._vid}:{self._pid}")
+        else:
+            return hash(self.desc)
 
 
 class ServerConnection:
@@ -101,6 +126,21 @@ class ServerConnection:
         if time.time() - last_time > SERVER_PING_CHECK:
             self._ping_result = (current_time, self._ping())
         return self._ping_result[1]
+
+
+T = TypeVar("T")
+
+
+def diff(old: set[T], new: set[T]):
+    added: set[T] = set()
+    removed: set[T] = set()
+    diffs = set(old) ^ set(new)
+    for item in diffs:
+        if item in old:
+            removed.add(item)
+        else:
+            added.add(item)
+    return added, removed
 
 
 def get_remote_usb_devices(ip: str):
@@ -181,21 +221,31 @@ def main(
         detach_all_ports()
 
 
+last_server_connections: set[ServerConnection] = set()
+last_device_connections: set[ImportedDevice] = set()
+
+
 def build_menu(
     icon: pystray.Icon,
     kill_signal: PipeConnection,
     servers: list[ServerConnection],
     server_list_lock: threading.Lock,
 ):
+    global last_server_connections
+    global last_device_connections
+
     def stop():
         icon.stop()
         kill_signal.send(True)
 
+    current_server_connections: set[ServerConnection] = set()
+    current_device_connections: set[ImportedDevice] = set()
     yield pystray.MenuItem("Servers:", action=lambda: None)
     yield pystray.Menu.SEPARATOR
     if server_list_lock.acquire(timeout=2):
         for server in servers:
             if server.is_alive:
+                current_server_connections.add(server)
                 yield pystray.MenuItem(f"[ONLINE] {server.ip}", action=lambda: None)
             else:
                 yield pystray.MenuItem(
@@ -206,9 +256,41 @@ def build_menu(
     yield pystray.MenuItem("Attached devices:", action=lambda: None)
     yield pystray.Menu.SEPARATOR
     for device in get_imported_devices():
+        current_device_connections.add(device)
         yield pystray.MenuItem(str(device), action=lambda: None)
     yield pystray.Menu.SEPARATOR
     yield pystray.MenuItem("Exit", action=stop)
+
+    new_servers, removed_servers = diff(
+        last_server_connections, current_server_connections
+    )
+    new_devices, removed_devices = diff(
+        set([hash(device) for device in last_device_connections]),
+        set([hash(device) for device in current_device_connections]),
+    )
+    all_devices = current_device_connections.union(last_device_connections)
+    device_map = {hash(device): device for device in all_devices}
+    new_devices = [device_map[h] for h in new_devices]
+    removed_devices = [device_map[h] for h in removed_devices]
+
+    for server in new_servers:
+        icon.notify(f"Server {server.ip} came online", "Online")
+
+    for server in removed_servers:
+        icon.notify(f"Server {server.ip} went offline", "Offline")
+
+    for device in new_devices:
+        icon.notify(
+            f"Device connected: {device.desc}", f"Attached {device.connection()}"
+        )
+
+    for device in removed_devices:
+        icon.notify(
+            f"Device disconnected: {device.desc}", f"Removed {device.connection()}"
+        )
+
+    last_server_connections = current_server_connections
+    last_device_connections = current_device_connections
 
 
 if __name__ == "__main__":
