@@ -193,7 +193,7 @@ def detach_all_ports():
         device.detach()
 
 
-def main(
+def scan_for_devices(
     servers: list[ServerConnection],
     kill_signal: PipeConnection,
     try_icon: pystray.Icon,
@@ -293,7 +293,7 @@ def build_menu(
     last_device_connections = current_device_connections
 
 
-if __name__ == "__main__":
+def main():
     global logger
     logging.basicConfig(level=logging.INFO)
     logger = logging.getLogger("auto-usbip-client")
@@ -305,8 +305,6 @@ if __name__ == "__main__":
     server_list_lock = threading.Lock()
     logo = Path("systray-logo.png")
     image = Image.open(logo)
-    attached_devices: list[str] = []
-    list_lock = threading.Lock()
     (kill_signal_rx, kill_signal_tx) = Pipe(False)
     tray_icon = pystray.Icon(
         "auto-usbip",
@@ -317,6 +315,12 @@ if __name__ == "__main__":
         ),
     )
     threading.Thread(
-        target=lambda: main(servers, kill_signal_rx, tray_icon, server_list_lock)
+        target=lambda: scan_for_devices(
+            servers, kill_signal_rx, tray_icon, server_list_lock
+        )
     ).start()
     tray_icon.run()
+
+
+if __name__ == "__main__":
+    main()

@@ -24,3 +24,11 @@ Python scripts for automatically mounting every USB device from a raspberry as s
 
 1. Navigate to the `client` directory and run `pip install -r requirements.txt`
 2. Copy the `client.py` and the `systray-logo.png` file to a permanent location on your PC for example `D:\tools\auto-usbip`
+3. It is probably convenient to create a `launch.bat` file or similar with all the IP addresses predefined so that running the program is more convenient.
+   For example:
+
+   ```batch
+   CALL python client.py 10.0.0.37
+   ```
+
+4. Just launch the python program whichever way you prefer. Just note that it does require admin privileges to run
