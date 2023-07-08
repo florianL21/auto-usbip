@@ -1,3 +1,4 @@
+from __future__ import annotations
 from multiprocessing.connection import PipeConnection
 from pathlib import Path
 import socket
@@ -11,12 +12,11 @@ import threading
 from multiprocessing import Pipe
 import logging
 import sys
+from serial.tools import list_ports
+from serial.tools.list_ports_common import ListPortInfo
 
 PORT = 3240
 USB_ID_REGEX = re.compile(r"^\s+([A-Za-z0-9.\-_]+)\:.*$")
-USB_PORT_REGEX = re.compile(
-    r"^Port\s([A-Za-z0-9.\-_]+)\:\s+(.*)$\n\s+(.*)$", re.MULTILINE
-)
 POLLING_TIME = 2
 PORT_KEEPALIVE_TIMEOUT = 5
 
@@ -48,17 +48,49 @@ def get_remote_usb_devices(ip: str):
 
 
 class ImportedDevice:
-    def __init__(self, port: int, kind: str, desc: str) -> None:
-        self.port = port
-        self.kind = kind
-        self.desc = desc
+    USB_PORT_REGEX = re.compile(
+        r"^Port\s([A-Za-z0-9.\-_]+)\:\s+(.*)$\n\s+(.*)$", re.MULTILINE
+    )
+    BRACKET_REGEX = re.compile(r"^.*\((.*)\)$", re.MULTILINE)
+
+    def __init__(
+        self, match: tuple[str, str, str], serial_connections: list[ListPortInfo]
+    ) -> None:
+        port, kind, desc = match
+        self.port = port.strip()
+        self.kind = kind.strip()
+        self.desc = desc.strip()
+        self.speed: str | None = None
+        self.vid = None
+        self.pid = None
+        self.com_port = None
+        re_match = ImportedDevice.BRACKET_REGEX.match(self.kind)
+        if re_match:
+            self.speed = re_match.group(1)
+        re_match = ImportedDevice.BRACKET_REGEX.match(self.desc)
+
+        if re_match:
+            vid_pid = re_match.group(1)
+            vid, pid = vid_pid.split(":")
+            self.vid = int(vid, 16)
+            self.pid = int(pid, 16)
+            potential_matches = [
+                conn.device
+                for conn in serial_connections
+                if conn.vid == self.vid and conn.pid == self.pid
+            ]
+            if len(potential_matches) == 1:
+                self.com_port = potential_matches[0]
 
     def detach(self):
         detach_device(str(self.port))
         logger.info(f"Detached device {self.desc}")
 
     def __str__(self) -> str:
-        return f"Port {self.port}: {self.kind} -> {self.desc}"
+        if self.vid is not None and self.pid is not None:
+            return f"[{self.com_port}] Port {self.port}: {self.speed} -> {self.desc}"
+        else:
+            return f"Port {self.port}: {self.kind} -> {self.desc}"
 
 
 def get_imported_devices():
@@ -68,9 +100,10 @@ def get_imported_devices():
         logger.error(f"Error getting list of attached ports: {p.stderr.decode()}")
         return ports
     output = p.stdout.decode()
-    matches = USB_PORT_REGEX.findall(output)
-    for port, type, desc in matches:
-        ports.append(ImportedDevice(int(port), type, desc))
+    serial_connections = list_ports.comports()
+    matches = ImportedDevice.USB_PORT_REGEX.findall(output)
+    for match in matches:
+        ports.append(ImportedDevice(match, serial_connections))
     return ports
 
 
